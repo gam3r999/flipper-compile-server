@@ -19,7 +19,6 @@ CORS(app, resources={r"/*": {
     "allow_headers": ["Content-Type"],
 }})
 
-# Belt-and-suspenders: manually set CORS headers on every response
 @app.after_request
 def add_cors_headers(response):
     origin = request.headers.get("Origin", "")
@@ -41,81 +40,109 @@ FIRMWARE_URLS = {
     "momentum":    "https://up.momentum-fw.dev/firmware/directory.json",
 }
 
-# Timeout constants (seconds)
-UFBT_UPDATE_TIMEOUT = 120   # SDK download can be slow
-UFBT_BUILD_TIMEOUT  = 180   # Compilation timeout
-GIT_CLONE_TIMEOUT   = 60    # Git clone timeout
+UFBT_UPDATE_TIMEOUT = 120
+UFBT_BUILD_TIMEOUT  = 300   # 5 min — handles large projects
+GIT_CLONE_TIMEOUT   = 120   # 2 min — handles big repos
+
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
-def is_safe_git_url(url: str) -> bool:
-    """Only allow well-formed public GitHub HTTPS URLs."""
-    return bool(re.match(r'^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(\.git)?$', url))
 
-def do_compile(tmp, firmware, app_name):
+def is_safe_git_url(url: str) -> bool:
+    """Accept any public GitHub HTTPS URL (with or without .git, subpaths ok)."""
+    return bool(re.match(
+        r'^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(\.git)?(/.*)?$', url
+    ))
+
+
+def find_fap_output(build_dir: str):
+    """Search all common ufbt output locations for a compiled .fap file."""
+    patterns = [
+        os.path.join(build_dir, "dist", "**", "*.fap"),
+        os.path.join(build_dir, ".ufbt", "build", "**", "*.fap"),
+        os.path.join(build_dir, "build", "**", "*.fap"),
+        os.path.join(build_dir, "**", "*.fap"),   # fallback — search everywhere
+    ]
+    for pattern in patterns:
+        hits = glob.glob(pattern, recursive=True)
+        # Exclude any .fap that was already in the repo (pre-built)
+        hits = [h for h in hits if ".ufbt" in h or "dist" in h or "build" in h]
+        if hits:
+            return hits[0]
+    return None
+
+
+def do_compile(build_dir: str, firmware: str):
+    """
+    Run ufbt update + ufbt build inside build_dir.
+    ufbt only compiles sources declared in application.fam — it ignores
+    everything else in the directory, so we never need to filter files.
+    Returns (fap_bytes, error_str).
+    """
     sdk_url = FIRMWARE_URLS.get(firmware, FIRMWARE_URLS["official"])
 
-    # Step 1: Update/download the SDK
+    # ── Step 1: pull/update the SDK ──────────────────────────────────────────
     try:
         update = subprocess.run(
             ["python3", "-m", "ufbt", "update", f"--index-url={sdk_url}"],
-            cwd=tmp, capture_output=True, text=True,
+            cwd=build_dir, capture_output=True, text=True,
             timeout=UFBT_UPDATE_TIMEOUT
         )
     except subprocess.TimeoutExpired:
-        return None, "SDK update timed out (120s). The firmware server may be slow — please retry."
+        return None, (
+            "SDK update timed out (120s).\n"
+            "The firmware index server may be slow — please try again."
+        )
 
     if update.returncode != 0:
-        return None, f"SDK update failed:\n{update.stderr or update.stdout}"
+        return None, f"SDK update failed:\n{(update.stderr or update.stdout).strip()}"
 
-    # Step 2: Build the app
+    # ── Step 2: build ─────────────────────────────────────────────────────────
     try:
         build = subprocess.run(
             ["python3", "-m", "ufbt"],
-            cwd=tmp, capture_output=True, text=True,
+            cwd=build_dir, capture_output=True, text=True,
             timeout=UFBT_BUILD_TIMEOUT
         )
     except subprocess.TimeoutExpired:
-        return None, "Compilation timed out (180s). Try a simpler project or retry."
-
-    if build.returncode != 0:
-        # Return both stderr and stdout for better diagnostics
-        error_output = (build.stderr or "") + "\n" + (build.stdout or "")
-        return None, f"Compile error:\n{error_output.strip()}"
-
-    # Step 3: Find the output .fap
-    fap_files = (
-        glob.glob(os.path.join(tmp, "dist", "*.fap")) +
-        glob.glob(os.path.join(tmp, ".ufbt", "build", "*.fap")) +
-        glob.glob(os.path.join(tmp, "build", "*.fap"))
-    )
-
-    if not fap_files:
         return None, (
-            "Build succeeded but no .fap file was found.\n"
-            f"Build output:\n{build.stdout}\n{build.stderr}"
+            "Compilation timed out (5 min).\n"
+            "The project may be unusually large — please try again."
         )
 
-    with open(fap_files[0], "rb") as f:
+    if build.returncode != 0:
+        error_output = ((build.stderr or "") + "\n" + (build.stdout or "")).strip()
+        return None, f"Compile error:\n{error_output}"
+
+    # ── Step 3: locate the .fap ───────────────────────────────────────────────
+    fap_path = find_fap_output(build_dir)
+    if not fap_path:
+        return None, (
+            "Build reported success but no .fap file was found.\n\n"
+            f"stdout:\n{build.stdout}\n\nstderr:\n{build.stderr}"
+        )
+
+    with open(fap_path, "rb") as f:
         return f.read(), None
 
 
+# ── /compile  (file upload mode) ─────────────────────────────────────────────
+
 @app.route("/compile", methods=["POST"])
 def compile_files():
-    data = request.json
+    data        = request.json
     c_content   = data.get("cFileContent", "")
     fam_content = data.get("famFileContent", "")
     c_filename  = data.get("cFileName", "app.c")
     firmware    = data.get("firmware", "official")
     extra_files = data.get("extraFiles", [])
 
-    # Validate firmware choice
     if firmware not in FIRMWARE_URLS:
         return jsonify({"success": False, "error": f"Unknown firmware: {firmware}"}), 400
 
-    # Auto-fix swapped files (same logic as before)
+    # Auto-fix swapped .c / .fam
     if "App(" in c_content or "appid=" in c_content:
         c_content, fam_content = fam_content, c_content
 
@@ -136,7 +163,6 @@ def compile_files():
             is_binary = ef.get("isBinary", False)
             if not name or content is None:
                 continue
-            # Sanitize path to prevent directory traversal
             safe_name = os.path.normpath(name.lstrip("/").lstrip("./"))
             if safe_name.startswith(".."):
                 continue
@@ -149,17 +175,18 @@ def compile_files():
                 with open(dest_path, "w") as f:
                     f.write(content)
 
-        fap_bytes, err = do_compile(tmp, firmware, app_name)
+        fap_bytes, err = do_compile(tmp, firmware)
         if err:
             return jsonify({"success": False, "error": err}), 500
 
     return app.response_class(
-        response=fap_bytes,
-        status=200,
+        response=fap_bytes, status=200,
         mimetype="application/octet-stream",
         headers={"Content-Disposition": f"attachment; filename={app_name}.fap"}
     )
 
+
+# ── /compile-git  (GitHub URL mode) ──────────────────────────────────────────
 
 @app.route("/compile-git", methods=["POST"])
 def compile_git():
@@ -170,66 +197,64 @@ def compile_git():
     if not git_url:
         return jsonify({"success": False, "error": "No GitHub URL provided"}), 400
 
-    # Validate firmware choice
     if firmware not in FIRMWARE_URLS:
         return jsonify({"success": False, "error": f"Unknown firmware: {firmware}"}), 400
 
-    # Strict URL validation — only allow safe public GitHub HTTPS URLs
-    if not is_safe_git_url(git_url):
-        return jsonify({
-            "success": False,
-            "error": (
-                "Invalid URL. Please use a full public GitHub HTTPS URL like:\n"
-                "  https://github.com/username/repo\n"
-                "  https://github.com/username/repo.git"
-            )
-        }), 400
+    # Normalise URL — strip trailing slashes, tree/branch paths, .git suffix
+    # so we always end up with a bare clone URL
+    clean_url = re.sub(r'\.git$', '', git_url.rstrip("/"))
+    clean_url = re.sub(r'/tree/[^/]+.*$', '', clean_url)   # strip /tree/branch/...
+    clone_url = clean_url + ".git"
 
-    repo_name = re.sub(r"[^A-Za-z0-9_]", "_", git_url.rstrip("/").split("/")[-1].replace(".git", ""))
+    if not is_safe_git_url(clean_url):
+        return jsonify({"success": False, "error": (
+            "Invalid URL. Please use a public GitHub repository URL, e.g.:\n"
+            "  https://github.com/username/repo"
+        )}), 400
+
+    repo_name = re.sub(r"[^A-Za-z0-9_]", "_", clean_url.rstrip("/").split("/")[-1])
 
     with tempfile.TemporaryDirectory() as tmp:
-        # Clone the repo (shallow, single branch for speed)
+        clone_dir = os.path.join(tmp, "repo")
+
+        # ── 1. Clone ──────────────────────────────────────────────────────────
         try:
             clone = subprocess.run(
-                ["git", "clone", "--depth=1", "--single-branch", git_url, "repo"],
-                cwd=tmp, capture_output=True, text=True,
-                timeout=GIT_CLONE_TIMEOUT
+                ["git", "clone", "--depth=1", "--single-branch", clone_url, clone_dir],
+                capture_output=True, text=True, timeout=GIT_CLONE_TIMEOUT
             )
         except subprocess.TimeoutExpired:
-            return jsonify({"success": False, "error": "Git clone timed out (60s). Check the URL or try again."}), 500
+            return jsonify({"success": False,
+                            "error": "Git clone timed out (120s). Check the URL or try again."}), 500
 
         if clone.returncode != 0:
-            return jsonify({
-                "success": False,
-                "error": (
-                    f"Git clone failed. Make sure the repository is public and the URL is correct.\n\n"
-                    f"Details:\n{clone.stderr or clone.stdout}"
-                )
-            }), 500
+            return jsonify({"success": False, "error": (
+                "Git clone failed. Make sure the repository is public.\n\n"
+                f"Details:\n{(clone.stderr or clone.stdout).strip()}"
+            )}), 500
 
-        repo_dir = os.path.join(tmp, "repo")
-
-        # Find application.fam to locate the app root directory
-        fam_files = glob.glob(os.path.join(repo_dir, "**", "application.fam"), recursive=True)
+        # ── 2. Find application.fam ───────────────────────────────────────────
+        fam_files = glob.glob(os.path.join(clone_dir, "**", "application.fam"), recursive=True)
         if not fam_files:
-            return jsonify({
-                "success": False,
-                "error": (
-                    "No application.fam found in the repository.\n"
-                    "Make sure this is a Flipper Zero app repo with an application.fam manifest."
-                )
-            }), 500
+            return jsonify({"success": False, "error": (
+                "No application.fam found in this repository.\n"
+                "This doesn't look like a Flipper Zero app — "
+                "every FZ app needs an application.fam manifest."
+            )}), 500
 
-        # Use the directory containing application.fam as the build root
+        # Pick the shallowest application.fam (the real app root, not a nested example)
+        fam_files.sort(key=lambda p: p.count(os.sep))
         app_dir = os.path.dirname(fam_files[0])
 
-        fap_bytes, err = do_compile(app_dir, firmware, repo_name)
+        # ── 3. Build directly in the app directory ────────────────────────────
+        # ufbt only compiles what application.fam declares — it ignores
+        # docs/, images/, tests/, reference code, etc. automatically.
+        fap_bytes, err = do_compile(app_dir, firmware)
         if err:
             return jsonify({"success": False, "error": err}), 500
 
     return app.response_class(
-        response=fap_bytes,
-        status=200,
+        response=fap_bytes, status=200,
         mimetype="application/octet-stream",
         headers={"Content-Disposition": f"attachment; filename={repo_name}.fap"}
     )
