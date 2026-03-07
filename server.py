@@ -8,7 +8,31 @@ import base64
 import re
 
 app = Flask(__name__)
-CORS(app)
+
+CORS(app, resources={r"/*": {
+    "origins": [
+        "https://fz-online-compiler.vercel.app",
+        "http://localhost:5173",
+        "http://localhost:4173",
+    ],
+    "methods": ["GET", "POST", "OPTIONS"],
+    "allow_headers": ["Content-Type"],
+}})
+
+# Belt-and-suspenders: manually set CORS headers on every response
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin", "")
+    allowed_origins = [
+        "https://fz-online-compiler.vercel.app",
+        "http://localhost:5173",
+        "http://localhost:4173",
+    ]
+    if origin in allowed_origins:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
 
 FIRMWARE_URLS = {
     "official":    "https://update.flipperzero.one/firmware/directory.json",
