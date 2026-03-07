@@ -185,6 +185,8 @@ def compile_files():
     if not c_content:
         return jsonify({"success": False, "error": "Missing .c source file"}), 400
 
+    app_name = re.sub(r"[^A-Za-z0-9_]", "_", c_filename.replace(".c", ""))
+
     # Auto-fix swapped .c / .fam — only when both files were actually uploaded
     if fam_content and ("App(" in c_content or "appid=" in c_content):
         c_content, fam_content = fam_content, c_content
@@ -192,8 +194,6 @@ def compile_files():
     # Auto-generate application.fam if not provided
     if not fam_content:
         fam_content = auto_generate_fam(c_content, app_name)
-
-    app_name = re.sub(r"[^A-Za-z0-9_]", "_", c_filename.replace(".c", ""))
 
     with tempfile.TemporaryDirectory() as tmp:
         with open(os.path.join(tmp, f"{app_name}.c"), "w") as f:
