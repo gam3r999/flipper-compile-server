@@ -46,6 +46,7 @@ GIT_CLONE_TIMEOUT   = 120   # 2 min — handles big repos
 
 
 @app.route("/health", methods=["GET"])
+@app.route("/keep-alive", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
