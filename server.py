@@ -29,14 +29,23 @@ def compile():
     firmware     = data.get("firmware", "official")
     extra_files  = data.get("extraFiles", [])
 
-    if not c_content.strip().startswith("#include") and not c_content.strip().startswith("//"):
-        return jsonify({
-            "success": False,
-            "error": f"ERROR: cFileContent doesn't look like C code!\nFirst 100 chars received: {c_content[:100]}\n\nMake sure the .c file is in the C Source slot and .fam is in the FAM slot."
-        }), 400
+    # Auto-fix swapped files
+    def looks_like_c(s):
+        s = s.strip()
+        return s.startswith("#include") or s.startswith("//") or s.startswith("int32_t")
+
+    def looks_like_fam(s):
+        s = s.strip()
+        return s.startswith("App(") or s.startswith("appid")
+
+    if looks_like_fam(c_content) and looks_like_c(fam_content):
+        c_content, fam_content = fam_content, c_content
 
     if not c_content or not fam_content:
         return jsonify({"success": False, "error": "Missing source files"}), 400
+
+    if not looks_like_c(c_content):
+        return jsonify({"success": False, "error": f"Could not detect valid C code.\nReceived: {c_content[:100]}"}), 400
 
     sdk_url  = FIRMWARE_URLS.get(firmware, FIRMWARE_URLS["official"])
     app_name = c_filename.replace(".c", "").replace("-", "_")
