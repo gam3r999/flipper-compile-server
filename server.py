@@ -75,6 +75,45 @@ def find_fap_output(build_dir: str):
     return None
 
 
+def auto_generate_fam(c_content: str, app_name: str) -> str:
+    """
+    Generate a minimal application.fam by scanning the C source for common
+    defines/strings, falling back to safe defaults if nothing is found.
+    """
+    # Try to extract appid
+    appid_match = re.search(r'#define\s+APP_ID\s+"([^"]+)"', c_content)
+    if not appid_match:
+        appid_match = re.search(r'appid\s*=\s*"([^"]+)"', c_content)
+    appid = appid_match.group(1) if appid_match else app_name
+
+    # Try to extract app name string
+    name_match = re.search(r'#define\s+APP_NAME\s+"([^"]+)"', c_content)
+    if not name_match:
+        name_match = re.search(r'name\s*=\s*"([^"]+)"', c_content)
+    name = name_match.group(1) if name_match else app_name.replace("_", " ").title()
+
+    # Try to extract version
+    ver_match = re.search(r'#define\s+APP_VERSION\s+"([^"]+)"', c_content)
+    version = ver_match.group(1) if ver_match else "1.0"
+
+    # Try to detect entry point — common patterns
+    entry_match = re.search(r'int32_t\s+(\w+)\s*\(\s*void\s*\)', c_content)
+    if not entry_match:
+        entry_match = re.search(r'int32_t\s+(\w+_app)\s*\(', c_content)
+    entry = entry_match.group(1) if entry_match else f"{app_name}_app"
+
+    return f"""App(
+    appid="{appid}",
+    name="{name}",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="{entry}",
+    requires=["gui"],
+    stack_size=2 * 1024,
+    fap_version="{version}",
+)
+"""
+
+
 def do_compile(build_dir: str, firmware: str):
     """
     Run ufbt update + ufbt build inside build_dir.
@@ -147,8 +186,12 @@ def compile_files():
     if "App(" in c_content or "appid=" in c_content:
         c_content, fam_content = fam_content, c_content
 
-    if not c_content or not fam_content:
-        return jsonify({"success": False, "error": "Missing source files"}), 400
+    if not c_content:
+        return jsonify({"success": False, "error": "Missing .c source file"}), 400
+
+    # Auto-generate application.fam if not provided
+    if not fam_content:
+        fam_content = auto_generate_fam(c_content, app_name)
 
     app_name = re.sub(r"[^A-Za-z0-9_]", "_", c_filename.replace(".c", ""))
 
