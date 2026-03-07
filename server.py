@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import os
 import glob
+import base64
 
 app = Flask(__name__)
 CORS(app)
@@ -22,23 +23,47 @@ def health():
 @app.route("/compile", methods=["POST"])
 def compile():
     data = request.json
-    c_content   = data.get("cFileContent", "")
-    fam_content = data.get("famFileContent", "")
-    c_filename  = data.get("cFileName", "app.c")
-    firmware    = data.get("firmware", "official")
+    c_content    = data.get("cFileContent", "")
+    fam_content  = data.get("famFileContent", "")
+    c_filename   = data.get("cFileName", "app.c")
+    firmware     = data.get("firmware", "official")
+    extra_files  = data.get("extraFiles", [])  # [{name, content, isBinary}]
 
     if not c_content or not fam_content:
         return jsonify({"success": False, "error": "Missing source files"}), 400
 
-    sdk_url = FIRMWARE_URLS.get(firmware, FIRMWARE_URLS["official"])
+    sdk_url  = FIRMWARE_URLS.get(firmware, FIRMWARE_URLS["official"])
     app_name = c_filename.replace(".c", "").replace("-", "_")
 
     with tempfile.TemporaryDirectory() as tmp:
-        # Write source files
-        c_path   = os.path.join(tmp, f"{app_name}.c")
-        fam_path = os.path.join(tmp, "application.fam")
-        with open(c_path,   "w") as f: f.write(c_content)
-        with open(fam_path, "w") as f: f.write(fam_content)
+        # Write main source files
+        with open(os.path.join(tmp, f"{app_name}.c"), "w") as f:
+            f.write(c_content)
+        with open(os.path.join(tmp, "application.fam"), "w") as f:
+            f.write(fam_content)
+
+        # Write extra files — preserving any subfolder structure
+        for ef in extra_files:
+            name      = ef.get("name", "")
+            content   = ef.get("content", "")
+            is_binary = ef.get("isBinary", False)
+
+            if not name or content is None:
+                continue
+
+            # Sanitize path — strip leading slashes/dots, keep subdirs
+            safe_name = name.lstrip("/").lstrip("./")
+            dest_path = os.path.join(tmp, safe_name)
+
+            # Make sure the parent directory exists
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+
+            if is_binary:
+                with open(dest_path, "wb") as f:
+                    f.write(base64.b64decode(content))
+            else:
+                with open(dest_path, "w") as f:
+                    f.write(content)
 
         # Update ufbt SDK for selected firmware
         update = subprocess.run(
