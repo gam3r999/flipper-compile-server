@@ -182,12 +182,12 @@ def compile_files():
     if firmware not in FIRMWARE_URLS:
         return jsonify({"success": False, "error": f"Unknown firmware: {firmware}"}), 400
 
-    # Auto-fix swapped .c / .fam
-    if "App(" in c_content or "appid=" in c_content:
-        c_content, fam_content = fam_content, c_content
-
     if not c_content:
         return jsonify({"success": False, "error": "Missing .c source file"}), 400
+
+    # Auto-fix swapped .c / .fam — only when both files were actually uploaded
+    if fam_content and ("App(" in c_content or "appid=" in c_content):
+        c_content, fam_content = fam_content, c_content
 
     # Auto-generate application.fam if not provided
     if not fam_content:
