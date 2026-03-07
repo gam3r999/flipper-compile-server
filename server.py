@@ -27,7 +27,13 @@ def compile():
     fam_content  = data.get("famFileContent", "")
     c_filename   = data.get("cFileName", "app.c")
     firmware     = data.get("firmware", "official")
-    extra_files  = data.get("extraFiles", [])  # [{name, content, isBinary}]
+    extra_files  = data.get("extraFiles", [])
+
+    if not c_content.strip().startswith("#include") and not c_content.strip().startswith("//"):
+        return jsonify({
+            "success": False,
+            "error": f"ERROR: cFileContent doesn't look like C code!\nFirst 100 chars received: {c_content[:100]}\n\nMake sure the .c file is in the C Source slot and .fam is in the FAM slot."
+        }), 400
 
     if not c_content or not fam_content:
         return jsonify({"success": False, "error": "Missing source files"}), 400
@@ -36,13 +42,11 @@ def compile():
     app_name = c_filename.replace(".c", "").replace("-", "_")
 
     with tempfile.TemporaryDirectory() as tmp:
-        # Write main source files
         with open(os.path.join(tmp, f"{app_name}.c"), "w") as f:
             f.write(c_content)
         with open(os.path.join(tmp, "application.fam"), "w") as f:
             f.write(fam_content)
 
-        # Write extra files — preserving any subfolder structure
         for ef in extra_files:
             name      = ef.get("name", "")
             content   = ef.get("content", "")
@@ -51,11 +55,8 @@ def compile():
             if not name or content is None:
                 continue
 
-            # Sanitize path — strip leading slashes/dots, keep subdirs
             safe_name = name.lstrip("/").lstrip("./")
             dest_path = os.path.join(tmp, safe_name)
-
-            # Make sure the parent directory exists
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
 
             if is_binary:
@@ -65,7 +66,6 @@ def compile():
                 with open(dest_path, "w") as f:
                     f.write(content)
 
-        # Update ufbt SDK for selected firmware
         update = subprocess.run(
             ["python3", "-m", "ufbt", "update", f"--index-url={sdk_url}"],
             cwd=tmp, capture_output=True, text=True
@@ -73,7 +73,6 @@ def compile():
         if update.returncode != 0:
             return jsonify({"success": False, "error": f"SDK update failed:\n{update.stderr}"}), 500
 
-        # Build
         build = subprocess.run(
             ["python3", "-m", "ufbt"],
             cwd=tmp, capture_output=True, text=True
@@ -81,7 +80,6 @@ def compile():
         if build.returncode != 0:
             return jsonify({"success": False, "error": f"Compile error:\n{build.stderr}"}), 500
 
-        # Find the .fap output
         fap_files = (
             glob.glob(os.path.join(tmp, "dist", "*.fap")) +
             glob.glob(os.path.join(tmp, ".ufbt", "build", "*.fap")) +
