@@ -123,12 +123,16 @@ def do_compile(build_dir: str, firmware: str):
     """
     sdk_url = FIRMWARE_URLS.get(firmware, FIRMWARE_URLS["official"])
 
+    # Each firmware gets its own ufbt home to avoid SDK cache collisions
+    ufbt_home = os.path.join(os.path.expanduser("~"), f".ufbt_{firmware}")
+    env = {**os.environ, "UFBT_HOME": ufbt_home}
+
     # ── Step 1: pull/update the SDK ──────────────────────────────────────────
     try:
         update = subprocess.run(
             ["python3", "-m", "ufbt", "update", f"--index-url={sdk_url}"],
             cwd=build_dir, capture_output=True, text=True,
-            timeout=UFBT_UPDATE_TIMEOUT
+            timeout=UFBT_UPDATE_TIMEOUT, env=env
         )
     except subprocess.TimeoutExpired:
         return None, (
@@ -144,7 +148,7 @@ def do_compile(build_dir: str, firmware: str):
         build = subprocess.run(
             ["python3", "-m", "ufbt"],
             cwd=build_dir, capture_output=True, text=True,
-            timeout=UFBT_BUILD_TIMEOUT
+            timeout=UFBT_BUILD_TIMEOUT, env=env
         )
     except subprocess.TimeoutExpired:
         return None, (
