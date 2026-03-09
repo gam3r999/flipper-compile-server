@@ -89,8 +89,11 @@ def compile():
     extra_files  = data.get("extraFiles", [])
 
     # Auto-fix swapped files
-    if "App(" in c_content or "appid=" in c_content:
-        c_content, fam_content = fam_content, c_content
+    try:
+        if isinstance(c_content, str) and ("App(" in c_content or "appid=" in c_content):
+            c_content, fam_content = fam_content, c_content
+    except Exception:
+        pass
 
     if not c_content or not fam_content:
         return jsonify({"success": False, "error": "Missing source files"}), 400
