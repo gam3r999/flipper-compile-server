@@ -47,6 +47,10 @@ def prewarm():
 
 threading.Thread(target=prewarm, daemon=True).start()
 
+@app.route("/keep-alive", methods=["GET", "HEAD"])
+def keep_alive():
+    return jsonify({"status": "ok"})
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "sdks_ready": list(_sdk_ready)})
@@ -58,7 +62,7 @@ def do_compile(tmp, firmware, app_name):
 
     build = subprocess.run(
         ["python3", "-m", "ufbt"],
-        cwd=tmp, capture_output=True, text=True, timeout=120
+        cwd=tmp, capture_output=True, text=True, timeout=240
     )
     if build.returncode != 0:
         return None, f"Compile error:\n{build.stderr}"
